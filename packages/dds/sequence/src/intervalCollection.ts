@@ -25,7 +25,8 @@ export interface ISerializableInterval extends MergeTree.IInterval {
     properties: MergeTree.PropertySet;
     propertyManager: MergeTree.PropertiesManager;
     serialize(client: MergeTree.Client);
-    addProperties(props: MergeTree.PropertySet, collaborating?: boolean, seq?: number);
+    addProperties(props: MergeTree.PropertySet, collaborating?: boolean, seq?: number):
+        MergeTree.PropertySet | undefined;
     getIntervalId(): string | undefined;
 }
 
@@ -140,7 +141,7 @@ export class Interval implements ISerializableInterval {
         collaborating: boolean = false,
         seq?: number,
         op?: MergeTree.ICombiningOp,
-    ) {
+    ): MergeTree.PropertySet | undefined {
         if (newProps) {
             if (!this.propertyManager) {
                 this.propertyManager = new MergeTree.PropertiesManager();
@@ -148,7 +149,7 @@ export class Interval implements ISerializableInterval {
             if (!this.properties) {
                 this.properties = MergeTree.createMap<any>();
             }
-            this.propertyManager.addProperties(this.properties, newProps, op, seq, collaborating);
+            return this.propertyManager.addProperties(this.properties, newProps, op, seq, collaborating);
         }
     }
 
@@ -255,16 +256,14 @@ export class SequenceInterval implements ISerializableInterval {
         collab: boolean = false,
         seq?: number,
         op?: MergeTree.ICombiningOp,
-    ) {
-        if (newProps) {
-            if (!this.propertyManager) {
-                this.propertyManager = new MergeTree.PropertiesManager();
-            }
-            if (!this.properties) {
-                this.properties = MergeTree.createMap<any>();
-            }
-            this.propertyManager.addProperties(this.properties, newProps, op, seq, collab);
+    ): MergeTree.PropertySet | undefined {
+        if (!this.propertyManager) {
+            this.propertyManager = new MergeTree.PropertiesManager();
         }
+        if (!this.properties) {
+            this.properties = MergeTree.createMap<any>();
+        }
+        return this.propertyManager.addProperties(this.properties, newProps, op, seq, collab);
     }
 
     public overlapsPos(bstart: number, bend: number) {
@@ -301,7 +300,9 @@ export class SequenceInterval implements ISerializableInterval {
         }
 
         const newInterval = createSequenceInterval(label, startPos, endPos, this.start.getClient(), this.intervalType);
-        newInterval.addProperties(this.properties);
+        if (this.properties) {
+            newInterval.addProperties(this.properties);
+        }
         return newInterval;
     }
 }
@@ -577,7 +578,10 @@ export class LocalIntervalCollection<TInterval extends ISerializableInterval> {
         props?: MergeTree.PropertySet) {
         const interval: TInterval = this.createInterval(start, end, intervalType);
         if (interval) {
-            interval.addProperties(props);
+            interval.properties = MergeTree.createMap<any>();
+            if (props) {
+                interval.addProperties(props);
+            }
             if (this.label && (this.label.length > 0)) {
                 interval.properties[MergeTree.reservedRangeLabelsKey] = [this.label];
             }
@@ -848,6 +852,9 @@ export class IntervalCollectionIterator<TInterval extends ISerializableInterval>
     }
 }
 
+export type IntervalPropertyDeltaCallback<TInterval extends ISerializableInterval> =
+    (interval: TInterval, propertyArgs: MergeTree.PropertySet) => void;
+
 export class IntervalCollection<TInterval extends ISerializableInterval> extends EventEmitter {
     private savedSerializedIntervals?: ISerializedInterval[];
     private localCollection: LocalIntervalCollection<TInterval>;
@@ -855,6 +862,7 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
     private client: MergeTree.Client;
     private pendingChangeStart: Map<string, ISerializedInterval[]>;
     private pendingChangeEnd: Map<string, ISerializedInterval[]>;
+    private propertyDeltaCallback: IntervalPropertyDeltaCallback<TInterval>;
 
     public get attached(): boolean {
         return !!this.localCollection;
@@ -864,6 +872,30 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
         private readonly emitter: IValueOpEmitter,
         serializedIntervals: ISerializedInterval[]) {
         super();
+        super.on("newListener", (event) => {
+            switch (event) {
+                case "propertyDelta":
+                    if (!this.propertyDeltaCallback) {
+                        this.propertyDeltaCallback = (interval: TInterval, propertyDeltas: MergeTree.PropertySet) => {
+                            this.emit("propertyDelta", interval, propertyDeltas);
+                        };
+                    }
+                    break;
+                default:
+                    break;
+            }
+        });
+        super.on("removeListener", (event: string | symbol) => {
+            switch (event) {
+                case "propertyDelta":
+                    if (super.listenerCount(event) === 0) {
+                        this.propertyDeltaCallback = undefined;
+                    }
+                    break;
+                default:
+                    break;
+            }
+        });
         this.savedSerializedIntervals = serializedIntervals;
     }
 
@@ -897,6 +929,14 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
             throw new Error("attach must be called before accessing intervals");
         }
         return this.localCollection.getIntervalById(id);
+    }
+
+    public getPropertyDeltaCallback(): IntervalPropertyDeltaCallback<TInterval> {
+        return this.propertyDeltaCallback;
+    }
+
+    public setPropertyDeltaCallback(callback: IntervalPropertyDeltaCallback<TInterval>) {
+        this.propertyDeltaCallback = callback;
     }
 
     public add(
@@ -984,7 +1024,7 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
         const interval = this.getIntervalById(id);
         if (interval) {
             // Pass Unassigned as the sequence number to indicate that this is a local op that is waiting for an ack.
-            interval.addProperties(props, true, MergeTree.UnassignedSequenceNumber);
+            const deltaProps = interval.addProperties(props, true, MergeTree.UnassignedSequenceNumber);
             const serializedInterval: ISerializedInterval = interval.serialize(this.client);
             // Emit a change op that will only change properties. Add the ID to the property bag provided by the caller.
             serializedInterval.start = undefined;
@@ -992,6 +1032,9 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
             serializedInterval.properties = props;
             serializedInterval.properties[reservedIntervalIdKey] = interval.getIntervalId();
             this.emitter.emit("change", undefined, serializedInterval);
+            if (this.propertyDeltaCallback) {
+                this.propertyDeltaCallback(interval, deltaProps);
+            }
         }
         this.emit("change", interval, true, undefined);
     }
@@ -1129,12 +1172,15 @@ export class IntervalCollection<TInterval extends ISerializableInterval> extends
                     // the one we originally found in the tree.
                     interval = this.localCollection.changeInterval(interval, start, end) ?? interval;
                 }
-                interval.addProperties(serializedInterval.properties, true, op.sequenceNumber);
+                const deltaProps = interval.addProperties(serializedInterval.properties, true, op.sequenceNumber);
                 if (this.onDeserialize) {
                     this.onDeserialize(interval);
                 }
-                this.emit("changeInterval", interval, local, op);
+                if (this.propertyDeltaCallback) {
+                    this.propertyDeltaCallback(interval, deltaProps);
+                }
             }
+            this.emit("changeInterval", interval, local, op);
         }
     }
 

@@ -11,6 +11,7 @@ export {
     ISerializedInterval,
     IntervalCollection,
     IntervalCollectionIterator,
+    IntervalPropertyDeltaCallback,
     SequenceInterval,
 } from "./intervalCollection";
 export {

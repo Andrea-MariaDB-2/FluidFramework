@@ -6,7 +6,7 @@
 import { strict as assert } from "assert";
 import { IFluidHandle } from "@fluidframework/core-interfaces";
 import { ISharedMap, SharedMap } from "@fluidframework/map";
-import { IntervalType, LocalReference } from "@fluidframework/merge-tree";
+import { IntervalType, LocalReference, PropertySet } from "@fluidframework/merge-tree";
 import { ISummaryBlob } from "@fluidframework/protocol-definitions";
 import { requestFluidObject } from "@fluidframework/runtime-utils";
 import {
@@ -656,11 +656,27 @@ describeFullCompat("SharedInterval", (getTestObjectProvider) => {
 
                 if (typeof(intervals1.changeProperties) === "function" &&
                     typeof(intervals2.changeProperties) === "function") {
+                    let deltaArgs1: PropertySet = {};
+                    let deltaArgs2: PropertySet = {};
+                    intervals1.setPropertyDeltaCallback((interval: SequenceInterval, propertyDeltas: PropertySet) => {
+                        deltaArgs1 = propertyDeltas;
+                    });
+                    intervals2.setPropertyDeltaCallback((interval: SequenceInterval, propertyDeltas: PropertySet) => {
+                        deltaArgs2 = propertyDeltas;
+                    });
                     intervals1.changeProperties(id1, { prop1: "prop1" });
+                    // eslint-disable-next-line no-null/no-null
+                    assert.strictEqual(deltaArgs1.prop1, null, "Mismatch in property-changed event arg 1");
                     await provider.opProcessingController.processOutgoing();
                     intervals2.changeProperties(id1, { prop2: "prop2" });
+                    // eslint-disable-next-line no-null/no-null
+                    assert.strictEqual(deltaArgs2.prop2, null, "Mismatch in property-changed event arg 2");
 
                     await provider.ensureSynchronized();
+                    // eslint-disable-next-line no-null/no-null
+                    assert.strictEqual(deltaArgs1.prop2, null, "Mismatch in property-changed event arg 3");
+                    // eslint-disable-next-line no-null/no-null
+                    assert.strictEqual(deltaArgs2.prop1, null, "Mismatch in property-changed event arg 4");
 
                     interval1 = intervals1.getIntervalById(id1);
                     assert.strictEqual(interval1.properties.prop1, "prop1", "Mismatch in changed properties 1");
@@ -670,10 +686,15 @@ describeFullCompat("SharedInterval", (getTestObjectProvider) => {
                     assert.strictEqual(interval2.properties.prop2, "prop2", "Mismatch in changed properties 4");
 
                     intervals1.changeProperties(id1, { prop1: "no" });
+                    assert.strictEqual(deltaArgs1.prop1, "prop1", "Mismatch in property-changed event arg 5");
                     await provider.opProcessingController.processOutgoing();
                     intervals2.changeProperties(id1, { prop1: "yes" });
+                    assert.strictEqual(deltaArgs2.prop1, "prop1", "Mismatch in property-changed event arg 6");
 
                     await provider.ensureSynchronized();
+                    assert.strictEqual(deltaArgs1.prop1, "no", "Mismatch in property-changed event arg 7");
+                    assert.strictEqual(Object.hasOwnProperty.call(deltaArgs2, "prop1"), false,
+                        "Mismatch in property-changed event arg 8");
 
                     assert.strictEqual(interval1.properties.prop1, "yes", "Mismatch in changed properties 5");
                     assert.strictEqual(interval1.properties.prop2, "prop2", "Mismatch in changed properties 6");
@@ -681,11 +702,17 @@ describeFullCompat("SharedInterval", (getTestObjectProvider) => {
                     assert.strictEqual(interval2.properties.prop2, "prop2", "Mismatch in changed properties 8");
 
                     intervals1.changeProperties(id1, { prop1: "maybe" });
+                    assert.strictEqual(deltaArgs1.prop1, "yes", "Mismatch in property-changed event arg 9");
                     await provider.opProcessingController.processOutgoing();
                     // eslint-disable-next-line no-null/no-null
                     intervals2.changeProperties(id1, { prop1: null });
+                    assert.strictEqual(deltaArgs2.prop1, "yes", "Mismatch in property-changed event arg 10");
 
                     await provider.ensureSynchronized();
+
+                    assert.strictEqual(deltaArgs1.prop1, "maybe", "Mismatch in property-changed event arg 11");
+                    assert.strictEqual(Object.hasOwnProperty.call(deltaArgs2, "prop1"), false,
+                        "Mismatch in property-changed event arg 12");
 
                     assert.strictEqual(Object.prototype.hasOwnProperty.call(interval1.properties, "prop1"), false,
                         "Property not deleted 1");
